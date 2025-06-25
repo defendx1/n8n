@@ -132,7 +132,7 @@ check_port_conflicts() {
             fi
         fi
         
-        if docker ps --format "table {{.Ports}}" | grep -q ":${AVAILABLE_PORT}->" 2>/dev/null; then
+        if docker ps --format "table {{.Ports}}" 2>/dev/null | grep -q ":${AVAILABLE_PORT}->"; then
             PORT_IN_USE=true
         fi
         
@@ -400,15 +400,19 @@ obtain_ssl_certificate() {
         fi
     else
         warn "Failed to obtain SSL certificate. Continuing with HTTP only."
+        warn "You can obtain SSL certificate manually later with:"
+        warn "certbot certonly --webroot -w /var/www/html -d $DOMAIN --email $EMAIL"
     fi
 }
 
 create_systemd_service() {
     log "Creating systemd service for n8n..."
     
-    cat > "/etc/systemd/system/n8n.service" << EOF
+    SERVICE_NAME="n8n_${DOMAIN//\./_}"
+    
+    cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
 [Unit]
-Description=n8n Workflow Automation - Defendx1.com
+Description=n8n Workflow Automation for ${DOMAIN} - Defendx1.com
 Requires=docker.service
 After=docker.service
 
@@ -425,14 +429,30 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable n8n.service
+    systemctl enable "${SERVICE_NAME}.service"
     
-    log "Systemd service created and enabled ✓"
+    log "Systemd service ${SERVICE_NAME}.service created and enabled ✓"
+}
+
+cleanup_existing_configs() {
+    log "Cleaning up any existing conflicting configurations..."
+    
+    if [[ -f "/etc/nginx/sites-enabled/${DOMAIN}" ]]; then
+        rm -f "/etc/nginx/sites-enabled/${DOMAIN}"
+        log "Removed existing nginx site configuration"
+    fi
+    
+    if docker ps -a --format "table {{.Names}}" | grep -q "^${N8N_CONTAINER_NAME}$"; then
+        log "Stopping and removing existing container..."
+        docker stop "$N8N_CONTAINER_NAME" 2>/dev/null || true
+        docker rm "$N8N_CONTAINER_NAME" 2>/dev/null || true
+    fi
 }
 
 main() {
     check_root
     get_domain_info
+    cleanup_existing_configs
     update_system
     install_docker
     install_nginx
@@ -466,14 +486,19 @@ main() {
     log "- Restart container: docker restart $N8N_CONTAINER_NAME"
     echo ""
     log "System Commands:"
-    log "- Restart service: systemctl restart n8n"
-    log "- Stop service: systemctl stop n8n"
-    log "- Start service: systemctl start n8n"
-    log "- Check status: systemctl status n8n"
+    log "- Restart service: systemctl restart n8n_${DOMAIN//\./_}"
+    log "- Stop service: systemctl stop n8n_${DOMAIN//\./_}"
+    log "- Start service: systemctl start n8n_${DOMAIN//\./_}"
+    log "- Check status: systemctl status n8n_${DOMAIN//\./_}"
     echo ""
     if docker ps --format "table {{.Names}}\t{{.Status}}" | grep -q "${N8N_CONTAINER_NAME}.*Up"; then
         log "✓ n8n is running in Docker container"
-        log "✓ Access your n8n instance at: https://$DOMAIN"
+        if [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
+            log "✓ Access your n8n instance at: https://$DOMAIN"
+        else
+            log "✓ Access your n8n instance at: http://$DOMAIN"
+            warn "SSL certificate not configured. Access via HTTP for now."
+        fi
     else
         warn "n8n container may not be running properly. Check: docker logs $N8N_CONTAINER_NAME"
     fi
